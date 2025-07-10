@@ -9,10 +9,10 @@ import time
 from transformers import (
     AutoTokenizer,
     LlamaForCausalLM,
-    LlamaForCausalLM_Conditional_Generation,
-    LlamaConfig,
 )
-from llama_recipes.datasets.music_tokenizer import MusicTokenizer
+from src.llama_recipes.transformers_minimal.src.transformers.models.llama.configuration_llama import LlamaConfig
+from src.llama_recipes.transformers_minimal.src.transformers.models.llama.modeling_llama import LlamaForCausalLM_Conditional_Generation
+from src.llama_recipes.datasets.music_tokenizer import MusicTokenizer
 
 import torch
 import torch.nn.functional as F
@@ -65,8 +65,10 @@ class MusicLlama:
             torch.cuda.manual_seed(seed)
         torch.manual_seed(seed)
 
-        llama_config = LlamaConfig.from_pretrained(model_config_path)
-        model = LlamaForCausalLM(llama_config) 
+        with open(model_config_path, 'r') as f:
+            config_dict = json.load(f)
+        llama_config = LlamaConfig.from_dict(config_dict)
+        model = LlamaForCausalLM_Conditional_Generation(llama_config) 
         start_time = time.time()
         checkpoint = torch.load(ckpt_dir)
         checkpoint = checkpoint['model_state_dict']
@@ -85,18 +87,25 @@ class MusicLlama:
   
         if is_xpu_available():
             model.to("xpu")
-        else:
+        elif torch.cuda.is_available():
             model.to("cuda")
+        else:
+            model.to("cpu")
+            print("CUDA not available, loading model to CPU. Performance will be significantly slower.")
         model.eval()
 
         tokenizer = MusicTokenizer(timeshift_vocab_size = llama_config.onset_vocab_size, dur_vocab_size = llama_config.dur_vocab_size, octave_vocab_size = llama_config.octave_vocab_size, pitch_class_vocab_size = llama_config.pitch_class_vocab_size, instrument_vocab_size = llama_config.instrument_vocab_size, velocity_vocab_size = llama_config.velocity_vocab_size)
         
-        if torch.cuda.is_bf16_supported():
-            torch.set_default_tensor_type(torch.cuda.BFloat16Tensor)
-            model = model.to(torch.bfloat16)  # Explicitly cast the entire model to BF16 precision.
-            print("model precision set to BF16")
+        if torch.cuda.is_available():
+            if torch.cuda.is_bf16_supported():
+                torch.set_default_tensor_type(torch.cuda.BFloat16Tensor)
+                model = model.to(torch.bfloat16)  # Explicitly cast the entire model to BF16 precision.
+                print("model precision set to BF16")
+            else:
+                torch.set_default_tensor_type(torch.cuda.HalfTensor) 
         else:
-            torch.set_default_tensor_type(torch.cuda.HalfTensor) 
+            torch.set_default_tensor_type(torch.FloatTensor)
+            print("CUDA not available, using FloatTensor for model precision.") 
 
         print(f"Loaded in {time.time() - start_time:.2f} seconds")
 
