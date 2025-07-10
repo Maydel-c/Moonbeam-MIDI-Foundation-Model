@@ -37,7 +37,7 @@ def load_moonbeam_model():
             finetuned_PEFT_weight_path=None, # No PEFT weights for now
         )
         print("Model and tokenizer loaded successfully!")
-        return music_llama_instance.model, music_llama_instance.tokenizer
+        return music_llama_instance, music_llama_instance.tokenizer
     except Exception as e:
         print(f"Error loading model: {e}")
         return None, None

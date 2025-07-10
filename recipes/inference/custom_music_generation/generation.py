@@ -154,16 +154,16 @@ class MusicLlama:
         total_len = min(self.config.max_len, max_gen_len + max_prompt_len) 
 
         pad_id = self.tokenizer.pad_token_compound
-        pad_tensor = torch.tensor(pad_id, dtype=torch.long, device="cuda").unsqueeze(0).unsqueeze(0) #create a tensor with shape: (bsz, total_len, 6) filled with pad_id
+        pad_tensor = torch.tensor(pad_id, dtype=torch.long, device=self.model.device).unsqueeze(0).unsqueeze(0) #create a tensor with shape: (bsz, total_len, 6) filled with pad_id
         tokens = pad_tensor.expand(bsz, total_len, -1).clone() #6, --> bsz, total_len, 6
 
         for k, t in enumerate(prompt_tokens): 
-            t_tensor = torch.tensor(t, dtype=torch.long, device="cuda")  # (len_t, 6) 
+            t_tensor = torch.tensor(t, dtype=torch.long, device=self.model.device)  # (len_t, 6) 
             tokens[k, :len(t)] = t_tensor  #tokens[k, :len(t)] --> len_t, 6
 
 
         prev_pos = 0
-        eos_reached = torch.tensor([False] * bsz, device="cuda")
+        eos_reached = torch.tensor([False] * bsz, device=self.model.device)
         input_mask = torch.all(tokens != pad_tensor, dim=-1).unsqueeze(-1) #(batch, len, 1)
 
         """KV Cache"""
@@ -183,13 +183,18 @@ class MusicLlama:
 
                 sample_indices = list(getattr(self.tokenizer, attribute).keys())
                 sample_indices_set = set(sample_indices)
+                print(f"\n--- Debugging {attribute} ---")
+                print(f"Sample indices: {sample_indices}")
                 if temperature > 0:
                     probs = torch.softmax(generation_logits[:, -1, : ]/ temperature, dim=-1) 
+                    print(f"Probs before masking: {probs[0, :10]}") # Print first 10 probabilities of first sample
                     next_decoder_token = sample_top_p(probs, top_p) 
+                    print(f"Initial sampled token: {next_decoder_token[0, 0].item()}")
                     
                     for i in range(next_decoder_token.size(0)):  # Ensure that all next_decoder_token values are in sample_indices, print warning if probability mass of all allowed indices is smaller than 0.8
                         start_time = time.time()
                         while next_decoder_token[i, 0].item() not in sample_indices_set:  # Check if token is valid
+                            print(f"  Invalid token {next_decoder_token[i, 0].item()} sampled. Resampling...")
                             if time.time() - start_time > 15:  # If sampling takes too long, mask invalid indices
                                 print(f"Warning: Resampling for token {i} exceeded 15 seconds. Masking invalid logits and Resampling...")
                                 # Set logits of invalid indices to -inf
@@ -197,7 +202,9 @@ class MusicLlama:
                                 mask[:, sample_indices] = probs[:, sample_indices]  
                                 # Recompute probabilities with the mask
                                 probs = torch.softmax(mask, dim=-1)
+                                print(f"Probs after masking: {probs[0, :10]}")
                             next_decoder_token[i, 0] = sample_top_p(probs, top_p)[i, 0]  
+                            print(f"  Resampled token: {next_decoder_token[i, 0].item()}")
                 else:
                     probs = torch.softmax(generation_logits[:, -1, :], dim=-1)  #batch*len_x, len_y (last), decode_vocab_size
                     sample_indices_tensor = torch.tensor(sample_indices, device=probs.device)  # Ensure it's on the same device as probs
@@ -211,6 +218,7 @@ class MusicLlama:
                 num_samples_below_threshold = (cumulative_prob < 0.8).sum().item()  # Count the number of True values
                 if num_samples_below_threshold > 0:
                     print(f"{num_samples_below_threshold} / {cumulative_prob.shape[0]} samples have a cumulative probability < 0.8 at the allowed indices")
+                print(f"Final next_decoder_token for {attribute}: {next_decoder_token[0, 0].item()}")
 
                 next_decoder_token_out = torch.cat([next_decoder_token_out, next_decoder_token], dim=-1) #batch*len_x, len_y
             
