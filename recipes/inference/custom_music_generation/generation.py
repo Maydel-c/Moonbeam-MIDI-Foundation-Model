@@ -32,6 +32,12 @@ class MusicLlama:
         max_seq_len: int,
         max_batch_size: int,
         finetuned_PEFT_weight_path: str,
+        timeshift_vocab_size: int,
+        dur_vocab_size: int,
+        octave_vocab_size: int,
+        pitch_class_vocab_size: int,
+        instrument_vocab_size: int,
+        velocity_vocab_size: int,
         model_parallel_size: Optional[int] = None,
         seed: int = 1,
     ) -> "MusicLlama":
@@ -68,6 +74,18 @@ class MusicLlama:
         with open(model_config_path, 'r') as f:
             config_dict = json.load(f)
         llama_config = LlamaConfig.from_dict(config_dict)
+        print(f"Debug: Full config_dict: {config_dict}")
+        llama_config.metadata_tokens = config_dict.get("metadata_tokens")
+        llama_config.metadata_tokens_pos = config_dict.get("metadata_tokens_pos")
+        llama_config.chord_dict = config_dict.get("chord_dict")
+        llama_config.bar_classes = config_dict.get("bar_classes")
+        llama_config.beat_classes = config_dict.get("beat_classes")
+
+        print(f"Debug: llama_config.metadata_tokens: {llama_config.metadata_tokens}")
+        print(f"Debug: llama_config.metadata_tokens_pos: {llama_config.metadata_tokens_pos}")
+        print(f"Debug: llama_config.chord_dict: {llama_config.chord_dict}")
+        print(f"Debug: llama_config.bar_classes: {llama_config.bar_classes}")
+        print(f"Debug: llama_config.beat_classes: {llama_config.beat_classes}")
         model = LlamaForCausalLM_Conditional_Generation(llama_config) 
         start_time = time.time()
         checkpoint = torch.load(ckpt_dir)
@@ -94,7 +112,7 @@ class MusicLlama:
             print("CUDA not available, loading model to CPU. Performance will be significantly slower.")
         model.eval()
 
-        tokenizer = MusicTokenizer(timeshift_vocab_size = llama_config.onset_vocab_size, dur_vocab_size = llama_config.dur_vocab_size, octave_vocab_size = llama_config.octave_vocab_size, pitch_class_vocab_size = llama_config.pitch_class_vocab_size, instrument_vocab_size = llama_config.instrument_vocab_size, velocity_vocab_size = llama_config.velocity_vocab_size)
+        tokenizer = MusicTokenizer(timeshift_vocab_size = timeshift_vocab_size, dur_vocab_size = dur_vocab_size, octave_vocab_size = octave_vocab_size, pitch_class_vocab_size = pitch_class_vocab_size, instrument_vocab_size = instrument_vocab_size, velocity_vocab_size = velocity_vocab_size)
         
         if torch.cuda.is_available():
             if torch.cuda.is_bf16_supported():
@@ -186,25 +204,37 @@ class MusicLlama:
                 print(f"\n--- Debugging {attribute} ---")
                 print(f"Sample indices: {sample_indices}")
                 if temperature > 0:
+                    # Check for NaN/inf in logits before masking
+                    if torch.isnan(generation_logits).any() or torch.isinf(generation_logits).any():
+                        print("Warning: NaN or Inf found in generation_logits before masking.")
+
+                    # Create a mask for valid indices
+                    valid_indices_mask = torch.zeros_like(generation_logits[:, -1, :], dtype=torch.bool)
+                    for idx in sample_indices:
+                        valid_indices_mask[:, idx] = True
+
+                    # Set logits of invalid indices to -inf
+                    generation_logits[:, -1, :][~valid_indices_mask] = float('-inf')
+
                     probs = torch.softmax(generation_logits[:, -1, : ]/ temperature, dim=-1) 
-                    print(f"Probs before masking: {probs[0, :10]}") # Print first 10 probabilities of first sample
+                    print(f"Probs after masking: {probs[0, :10]}") # Print first 10 probabilities of first sample
                     next_decoder_token = sample_top_p(probs, top_p) 
                     print(f"Initial sampled token: {next_decoder_token[0, 0].item()}")
                     
-                    for i in range(next_decoder_token.size(0)):  # Ensure that all next_decoder_token values are in sample_indices, print warning if probability mass of all allowed indices is smaller than 0.8
+                    # The while loop for resampling should now be largely unnecessary if masking is effective
+                    # but keeping it as a safeguard for extreme cases or if top_p causes issues.
+                    for i in range(next_decoder_token.size(0)):  # Ensure that all next_decoder_token values are in sample_indices
                         start_time = time.time()
                         while next_decoder_token[i, 0].item() not in sample_indices_set:  # Check if token is valid
-                            print(f"  Invalid token {next_decoder_token[i, 0].item()} sampled. Resampling...")
-                            if time.time() - start_time > 15:  # If sampling takes too long, mask invalid indices
-                                print(f"Warning: Resampling for token {i} exceeded 15 seconds. Masking invalid logits and Resampling...")
-                                # Set logits of invalid indices to -inf
+                            print(f"  Invalid token {next_decoder_token[i, 0].item()} sampled for batch item {i}. Resampling...")
+                            if time.time() - start_time > 15:  # If sampling takes too long, this indicates a deeper issue
+                                print(f"Warning: Resampling for token {i} exceeded 15 seconds. This should not happen with proper masking.")
+                                # Fallback: re-mask and re-normalize if somehow an invalid token was sampled
                                 mask = torch.full_like(probs, float('-inf'))
                                 mask[:, sample_indices] = probs[:, sample_indices]  
-                                # Recompute probabilities with the mask
                                 probs = torch.softmax(mask, dim=-1)
-                                print(f"Probs after masking: {probs[0, :10]}")
-                            next_decoder_token[i, 0] = sample_top_p(probs, top_p)[i, 0]  
-                            print(f"  Resampled token: {next_decoder_token[i, 0].item()}")
+                            next_decoder_token[i, 0] = sample_top_p(probs[i:i+1, :], top_p)[0, 0]  
+                            print(f"  Resampled token for batch item {i}: {next_decoder_token[i, 0].item()}")
                 else:
                     probs = torch.softmax(generation_logits[:, -1, :], dim=-1)  #batch*len_x, len_y (last), decode_vocab_size
                     sample_indices_tensor = torch.tensor(sample_indices, device=probs.device)  # Ensure it's on the same device as probs
@@ -222,17 +252,24 @@ class MusicLlama:
 
                 next_decoder_token_out = torch.cat([next_decoder_token_out, next_decoder_token], dim=-1) #batch*len_x, len_y
             
-            #remove the sos_out token 
-            next_decoder_token_out_reshaped = next_decoder_token_out[:, 1:].view(tokens.shape[0], -1 ,6) #batch*len_x, 6 --> batch, len_x, 6
+            # Keep the SOS_OUT token as the first element so that each language token group
+            # has 7 values (SOS_OUT + 6 musical attributes). This aligns with what
+            # `MusicTokenizer.convert_from_language_tokens` expects: it will simply ignore
+            # the SOS_OUT token (x[0]) and correctly decode the remaining attributes.
+            next_decoder_token_out_reshaped = next_decoder_token_out.view(tokens.shape[0], -1, 7)  # (batch, len_x, 7)
+            print(f"Debug: next_decoder_token_out_reshaped shape: {next_decoder_token_out_reshaped.shape}")
+            print(f"Debug: next_decoder_token_out_reshaped (first row): {next_decoder_token_out_reshaped[0, 0, :].tolist()}")
             next_decoder_token_lang = self.tokenizer.convert_from_language_tokens(next_decoder_token_out_reshaped) #batch, lenx, 6 
             
-            previous_onset = tokens[:, cur_pos-1, 0] #batch, 
-            new_onset = previous_onset + next_decoder_token_lang.clone().detach()[:, -1, 0].to(previous_onset) #batch, + batch --> batch
-            next_decoder_token_onset = torch.cat ([new_onset.unsqueeze(-1) ,next_decoder_token_lang.clone().detach()[:, -1, 1:]],dim=-1).to(tokens) #batch, 1  cat  batch, 5
-            next_token = torch.where(
-                input_mask[:, cur_pos], tokens[:, cur_pos], next_decoder_token_onset
-            ) 
-            tokens[:, cur_pos] = next_token
+            # Instead of accumulating absolute onset values (which can exceed the vocabulary
+            # range), keep everything in the raw (compound) token space produced by the decoder.
+            # `next_decoder_token_lang` is already in that space: [timeshift, dur, octave, pitch, instr, vel]
+            next_token = next_decoder_token_lang[:, -1, :].to(tokens)
+            # Only overwrite positions that are NOT part of the original prompt (i.e., where
+            # input_mask is False for the current position).
+            tokens[:, cur_pos] = torch.where(
+                input_mask[:, cur_pos], tokens[:, cur_pos], next_token
+            )
 
             """check if next token is eos"""
             eos_conditions_onset= next_decoder_token_lang.clone().detach()[:, -1, 0] == self.tokenizer.eos_timeshift #batch, 
@@ -324,25 +361,27 @@ class MusicLlama:
         ]
 
 def sample_top_p(probs, p):
-    """
-    Perform top-p (nucleus) sampling on a probability distribution.
-
-    Args:
-        probs (torch.Tensor): Probability distribution tensor.
-        p (float): Probability threshold for top-p sampling.
-
-    Returns:
-        torch.Tensor: Sampled token indices.
-
-    Note:
-        Top-p sampling selects the smallest set of tokens whose cumulative probability mass
-        exceeds the threshold p. The distribution is renormalized based on the selected tokens.
-    """
+    print(f"  sample_top_p: Input probs shape: {probs.shape}")
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
+    print(f"  sample_top_p: probs_sort (first 10): {probs_sort[0, :10]}")
+    print(f"  sample_top_p: probs_idx (first 10): {probs_idx[0, :10]}")
     probs_sum = torch.cumsum(probs_sort, dim=-1)
     mask = probs_sum - probs_sort > p
+    print(f"  sample_top_p: Mask (first 10): {mask[0, :10]}")
     probs_sort[mask] = 0.0
-    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
+    print(f"  sample_top_p: Probs_sort after masking (first 10): {probs_sort[0, :10]}")
+    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True).clamp(min=1e-8)) # Add clamp to avoid division by zero
+    
+    # Filter out tokens with zero probability to avoid issues with torch.multinomial
+    non_zero_probs_mask = (probs_sort > 0).float()
+    probs_sort = probs_sort * non_zero_probs_mask
+    probs_idx = probs_idx * non_zero_probs_mask.long() # Mask indices as well
+
+    # Re-normalize after filtering zero probabilities
+    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True).clamp(min=1e-8))
+
     next_token = torch.multinomial(probs_sort, num_samples=1)
+    print(f"  sample_top_p: Next token index in sorted list: {next_token[0, 0].item()}")
     next_token = torch.gather(probs_idx, -1, next_token)
+    print(f"  sample_top_p: Final sampled token: {next_token[0, 0].item()}")
     return next_token

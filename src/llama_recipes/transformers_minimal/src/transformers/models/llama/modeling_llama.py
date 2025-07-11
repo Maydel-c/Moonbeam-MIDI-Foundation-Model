@@ -1434,7 +1434,19 @@ class LlamaModel(LlamaPreTrainedModel):
         durs = self.dur_embedding(input_ids_tmp[..., 1])
         octaves = self.octave_embedding(input_ids_tmp[..., 2]) 
         pitch_classes = self.pitch_embedding(input_ids_tmp[..., 3])
-        instruments = self.instrument_embedding(input_ids_tmp[..., 4]) 
+        # Validate and clamp instrument indices to stay within embedding vocabulary range
+        instrument_idx = input_ids_tmp[..., 4]
+        instr_vocab_size = None
+        if hasattr(self.config, "instrument_embedding") and isinstance(self.config.instrument_embedding, dict):
+            instr_vocab_size = self.config.instrument_embedding.get("vocab_size", None)
+        # If we know the vocab size, ensure indices are valid
+        if instr_vocab_size is not None:
+            invalid_mask = (instrument_idx < 0) | (instrument_idx >= instr_vocab_size)
+            if torch.any(invalid_mask):
+                # Log the number of invalid indices we are fixing
+                print(f"[embed_tokens] Warning: clamping {invalid_mask.sum().item()} instrument indices (valid 0-{instr_vocab_size-1}).")
+                instrument_idx = instrument_idx.clamp(0, instr_vocab_size - 1)
+        instruments = self.instrument_embedding(instrument_idx) 
         velocities = self.velocity_embedding(input_ids_tmp[..., 5])
         out_fme = torch.concat([onsets, durs, octaves, pitch_classes, instruments, velocities], dim=-1) #batch, len, dim*6
         

@@ -136,6 +136,13 @@ class LlamaConfig(PretrainedConfig):
         attention_bias=False,
         attention_dropout=0.0,
         mlp_bias=False,
+        metadata_tokens=None,
+        metadata_tokens_pos=None,
+        if_add_metadata_in_decoder=False,
+        if_add_chord_in_decoder=False,
+        chord_dict=None,
+        bar_classes=0,
+        beat_classes=0,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -161,6 +168,13 @@ class LlamaConfig(PretrainedConfig):
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.mlp_bias = mlp_bias
+        self.metadata_tokens = metadata_tokens
+        self.metadata_tokens_pos = metadata_tokens_pos
+        self.if_add_metadata_in_decoder = if_add_metadata_in_decoder
+        self.if_add_chord_in_decoder = if_add_chord_in_decoder
+        self.chord_dict = chord_dict
+        self.bar_classes = bar_classes
+        self.beat_classes = beat_classes
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,

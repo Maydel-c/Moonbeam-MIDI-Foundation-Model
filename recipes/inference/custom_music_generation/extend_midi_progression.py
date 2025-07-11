@@ -42,14 +42,19 @@ def extend_midi_progression():
                 print(f"Warning: No musical events found in {file_name}. Skipping.")
                 continue
 
-            # The model expects a list of lists of lists for prompt_tokens
-            # And encode_series_labels expects a list of lists
-            # So we need to convert original_compound_tokens (list of lists) to the expected format
-            # The model's generate method expects a batch, so we wrap it in another list.
+            # Convert the raw compound tokens into language-token indices that the transformer expects.
+            # 1. Add an SOS compound token.
             original_compound_tokens_with_sos = tokenizer.encode_series(
                 original_compound_tokens, if_add_sos=True, if_add_eos=False
             )
-            prompt_tokens_for_model = [original_compound_tokens_with_sos]
+            # 2. Convert to language tokens (timeshift-based representation) so they align with the pretrained vocabulary.
+            language_prompt_tokens_7 = tokenizer.encode_series_labels(
+                original_compound_tokens_with_sos, if_added_sos=True, if_added_eos=False
+            )
+            # Drop the first attribute (SOS_OUT) so each token has 6 fields as expected by the transformer.
+            language_prompt_tokens = [tok[1:] for tok in language_prompt_tokens_7]
+            # 3. The generate method expects a batch dimension.
+            prompt_tokens_for_model = [language_prompt_tokens]
 
             for i in range(NUM_VARIATIONS):
                 print(f"  Generating variation {i + 1}/{NUM_VARIATIONS}...")

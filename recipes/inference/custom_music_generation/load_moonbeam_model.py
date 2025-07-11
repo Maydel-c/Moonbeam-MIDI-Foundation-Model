@@ -28,6 +28,10 @@ def load_moonbeam_model():
     print(f"Using model configuration: {model_config_path}")
     try:
         # MusicLlama.build handles loading the model and tokenizer
+        import json
+        with open(model_config_path, 'r') as f:
+            model_config = json.load(f)
+        
         music_llama_instance = MusicLlama.build(
             ckpt_dir=ckpt_dir,
             model_config_path=model_config_path,
@@ -35,6 +39,12 @@ def load_moonbeam_model():
             max_seq_len=max_seq_len,
             max_batch_size=max_batch_size,
             finetuned_PEFT_weight_path=None, # No PEFT weights for now
+            timeshift_vocab_size=model_config["onset_vocab_size"],
+            dur_vocab_size=model_config["dur_vocab_size"],
+            octave_vocab_size=model_config["octave_vocab_size"],
+            pitch_class_vocab_size=model_config["pitch_class_vocab_size"],
+            instrument_vocab_size=model_config["instrument_vocab_size"],
+            velocity_vocab_size=model_config["velocity_vocab_size"],
         )
         print("Model and tokenizer loaded successfully!")
         return music_llama_instance, music_llama_instance.tokenizer

@@ -251,14 +251,34 @@ class MusicTokenizer():
         original_shape = inp.shape
         inp_flattened = inp.view(-1, original_shape[-1])
         out = []
-        for x in inp_flattened: #(batch, vocab)
-            timeshift = self.timeshift_dict_decode[x[0].item()]
-            duration = self.duration_dict_decode[x[1].item()]
-            octave = self.octave_dict_decode[x[2].item()]
-            pitch = self.pitch_dict_decode[x[3].item()]
-            instrument = self.instrument_dict_decode[x[4].item()]
-            velocity = self.velocity_dict_decode[x[5].item()]
-            # print(f"onset:{onset}, duration:{duration}, octave:{octave}.pitch:{pitch}, instrument:{instrument},  velocity{velocity}")
+        # Helper to safely decode an index, clamping to the valid range if necessary
+        def _safe_decode(decode_dict, idx, attr_name):
+            if idx in decode_dict:
+                return decode_dict[idx]
+            # Clamp the index to the nearest valid key and emit a warning.
+            min_key = min(decode_dict.keys())
+            max_key = max(decode_dict.keys())
+            clamped_idx = max(min(idx, max_key), min_key)
+            if clamped_idx != idx:
+                print(f"[convert_from_language_tokens] Warning: clamping invalid {attr_name} index {idx} to {clamped_idx} (valid range {min_key}-{max_key}).")
+            return decode_dict[clamped_idx]
+
+        for x in inp_flattened:  # (batch, vocab)
+            # Some call sites (e.g., inference pipeline) pass tokens WITHOUT the SOS_OUT leading field (len==6).
+            # Detect the length and adjust index offset accordingly.
+            if x.numel() == 7:
+                offset = 1  # x[0] is SOS_OUT
+            elif x.numel() == 6:
+                offset = 0  # No SOS_OUT present
+            else:
+                raise ValueError(f"convert_from_language_tokens expected 6 or 7 values per token group, got {x.numel()}")
+
+            timeshift = _safe_decode(self.timeshift_dict_decode, x[0+offset].item(), 'timeshift')
+            duration  = _safe_decode(self.duration_dict_decode,  x[1+offset].item(), 'duration')
+            octave    = _safe_decode(self.octave_dict_decode,    x[2+offset].item(), 'octave')
+            pitch     = _safe_decode(self.pitch_dict_decode,     x[3+offset].item(), 'pitch')
+            instrument= _safe_decode(self.instrument_dict_decode,x[4+offset].item(), 'instrument')
+            velocity  = _safe_decode(self.velocity_dict_decode,  x[5+offset].item(), 'velocity')
             out.append([timeshift, duration, octave, pitch, instrument, velocity])
         out = torch.tensor(out)
         out = out.view(*original_shape[:-1], -1)
@@ -454,6 +474,28 @@ class MusicTokenizer():
         num_tracks = 0
         for time_in_ticks, event_type in sorted(time_index.keys()):
             for (note, instrument, velocity) in time_index[(time_in_ticks, event_type)]:
+                # Sanitize MIDI parameters
+                note = int(note)
+                velocity = int(velocity)
+                if note < 0 or note > 127:
+                    print(f"[compound_to_midi] Warning: clamping invalid note {note} to range 0-127.")
+                    note = max(0, min(127, note))
+                if velocity < 0 or velocity > 127:
+                    print(f"[compound_to_midi] Warning: clamping invalid velocity {velocity} to range 0-127.")
+                    velocity = max(0, min(127, velocity))
+                # Ensure `instrument` is a plain Python int and clamp to a valid MIDI program (0–127).
+                instrument = int(instrument)
+                if instrument < 0 or instrument > 127:
+                    # Treat anything outside the valid range as a General MIDI drums channel (channel 9) with program 0.
+                    print(f"[compound_to_midi] Warning: clamping invalid instrument {instrument} to 0 (drums channel).")
+                    instrument = 0
+                # Ensure `instrument` is a plain Python int and clamp to a valid MIDI program (0–127).
+                instrument = int(instrument)
+                if instrument < 0 or instrument > 127:
+                    # Treat anything outside the valid range as a General MIDI drums channel (channel 9) with program 0.
+                    # This choice avoids out-of-range errors while still producing an audible track.
+                    print(f"[compound_to_midi] Warning: clamping invalid instrument {instrument} to 0 (drums channel).")
+                    instrument = 0
                 if event_type == 0: # onset
                     try:
                         track, previous_time, idx = track_idx[instrument]
@@ -462,7 +504,7 @@ class MusicTokenizer():
                         previous_time = 0
                         track = mido.MidiTrack()
                         mid.tracks.append(track)
-                        if instrument == 128: # drums always go on channel 9
+                        if instrument == 128 or instrument == 0:  # treat 128 (legacy drums token) or clamped 0 as drums, always on channel 9
                             idx = 9
                             message = mido.Message('program_change', channel=idx, program=0)
                         else:
